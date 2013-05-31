@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+
+# alna tries to guess the base directory (where the image files are) using $0.
+# If that fails, set the directory here:
+#BASEDIR=
+if [[ -z "${BASEDIR}" ]]; then
+	BASEDIR="$(dirname "$0")"
+fi
+
+# alna tries to guess the name of this script, if it doesn't work set the 
+# full path to the script here
+if [[ -z "$SCRIPT" ]]; then
+	SCRIPT="$0"
+	if [[ ! -e "$SCRIPT" ]]; then
+		SCRIPT="$BASENAME/alna"
+	fi
+fi
+
+# Selects a random background image. The empty image has a much higher
+# probability.
+randomImg() {
+	if (((RANDOM % 150) == 0)); then
+		echo "${BASEDIR}/background_$(printf %02d $((RANDOM % 11))).png"
+	else
+		echo "${BASEDIR}/background_empty.png"
+	fi
+}
+
+# Generates one row of background.
+# $1 - number of images to concatenate. Each image is 11x11 pixels in size and
+#      will later be scaled up.
+randomRow() {
+	[[ -z "$1" ]] && return 1
+	local imgs=()
+	local i
+	for ((i = 0; i < "$1"; i++)); do
+		imgs+=("$(randomImg)")
+	done
+	convert "${imgs[@]}" +append miff:-
+}
+
+# scales the background
+scale() {
+	convert - -scale 400% miff:-
+}
+
+# adds the rainbow
+# $1 - length of the rainbow from the left edge. Will be rounded up to the next
+#      multiple of 192.
+# $2 - vertical position
+addRainbow() {
+	composite -gravity northwest -geometry +0+"$2"\
+		<(imgs=()
+		 ((count = ($1 + 191)/192))
+		 for ((i=0; i < count; i++)); do
+			imgs+=("$BASEDIR/rainbow.png")
+		 done
+		 convert "${imgs[@]}" +append -scale 800% miff:-)\
+		- miff:-
+}
+
+# adds the cat
+# $1 - horizontal position
+# $2 - vertical position
+addCat() {
+	composite -geometry +"$1"+"$2"\
+		<(convert "$BASEDIR/cat.png" -scale 1600% miff:-)\
+		- miff:-
+}
+
+# used if parallel is found
+if [[ "$1" == "row" ]]; then
+	randomRow "$2"
+	exit
+fi
+
+TMPDIR="$(mktemp -d)"
+trap "rm -rf '$TMPDIR'" EXIT
+
+# put sizes into the arrays widths and heights. Also compute the sum of the
+# widths and the maximum of the height
+total_width=0
+max_height=0
+widths=()
+heights=()
+while (( $# > 0 )); do
+	width=("${1%%x*}")
+	height=("${1##*x}")
+	((total_width += width))
+	if (( height > max_height )); then
+		max_height="$height"
+	fi
+	widths+=("$width")
+	heights+=("$height")
+	shift
+done
+
+# stores the names for all rows in "rows"
+((tilesPerRow = (total_width + 43) / 44))
+((rowCount = (max_height + 43) / 44))
+rows=()
+for ((i=0; i < "$rowCount"; i++)); do
+	rows+=("$(printf "${TMPDIR}/row%05d.png" "$i")")
+done
+
+# generate rows either using parallel or a simple for loop
+if parallel --version >/dev/null 2>&1; then
+	parallel --eta "$SCRIPT" row "$tilesPerRow" \>{} ::: "${rows[@]}"
+else
+	for ((i = 0; i < "${#rows[@]}"; i++)); do
+		randomRow "$tilesPerRow" >"${rows[i]}"
+	done
+fi
+
+convert "${rows[@]}" -append miff:- |
+	scale |
+	addRainbow "$(($total_width - ${widths[-1]}/2))" "$((max_height * 5 / 8))" |
+	addCat "$((total_width - ${widths[-1]} / 2 - 100))"\
+		"$((max_height * 5 / 8 - 100))" |
+	convert - "${TMPDIR}/image.png"
+
+# crop images for each screen
+offset=0
+rainbow="$((max_height * 5 / 8))"
+for ((i = 0; i < "${#widths[@]}"; i++)); do
+	convert "${TMPDIR}/image.png" -gravity northwest -crop\
+		"${widths[i]}x${heights[i]}+${offset}+$((rainbow-${heights[i]}*5/8))"\
+		+repage nyan"${i}".png
+	((offset += ${widths[i]}))
+done
